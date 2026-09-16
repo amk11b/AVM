@@ -194,6 +194,17 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 
+# Generated AVM data/model artifacts
+catboost_info/
+modeling/catboost_info/
+modeling/*.csv
+modeling/*.parquet
+modeling/feature_importance.png
+*.joblib
+*.pt
+*.parquet
+models/local/
+
 # Cursor
 #  Cursor is an AI-powered code editor. `.cursorignore` specifies files/directories to
 #  exclude from AI features like autocomplete and code analysis. Recommended for sensitive data

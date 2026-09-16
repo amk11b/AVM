@@ -2,7 +2,7 @@ import os
 import pandas as pd
 from apify_client import ApifyClient
 from google.cloud import storage
-from datetime import datetime
+from datetime import datetime, time
 import json
 
 # --- CONFIGURATION ---
@@ -20,107 +20,111 @@ ACTOR_ID = "epctex/rightmove-scraper"
 
 # ---------------------
 
-def run_scraper(location, max_items=50):
-    """
-    Runs the Apify scraper using a direct Rightmove Search URL.
-    """
-    # 1. Rightmove URL for BIRMINGHAM
-    rightmove_url = "https://www.rightmove.co.uk/property-for-sale/find.html?locationIdentifier=REGION%5E162&sortType=6&includeSSTC=false"
+TARGET_LOCATIONS = {
+    "Bristol": "https://www.rightmove.co.uk/property-for-sale/find.html?locationIdentifier=REGION%5E219&sortType=6&includeSSTC=false",
+    "Birmingham": "https://www.rightmove.co.uk/property-for-sale/find.html?locationIdentifier=REGION%5E162&sortType=6&includeSSTC=false",
+    "Manchester": "https://www.rightmove.co.uk/property-for-sale/find.html?locationIdentifier=REGION%5E904&sortType=6&includeSSTC=false",
+    "Leeds": "https://www.rightmove.co.uk/property-for-sale/find.html?locationIdentifier=REGION%5E787&sortType=6&includeSSTC=false",
+    "Liverpool": "https://www.rightmove.co.uk/property-for-sale/find.html?locationIdentifier=REGION%5E814&sortType=6&includeSSTC=false",
+    "Sheffield": "https://www.rightmove.co.uk/property-for-sale/find.html?locationIdentifier=REGION%5E1195&sortType=6&includeSSTC=false",
+    "Nottingham": "https://www.rightmove.co.uk/property-for-sale/find.html?locationIdentifier=REGION%5E1019&sortType=6&includeSSTC=false",
+    "Newcastle": "https://www.rightmove.co.uk/property-for-sale/find.html?locationIdentifier=REGION%5E984&sortType=6&includeSSTC=false",
+    "Leicester": "https://www.rightmove.co.uk/property-for-sale/find.html?locationIdentifier=REGION%5E813&sortType=6&includeSSTC=false",
+    "Cardiff": "https://www.rightmove.co.uk/property-for-sale/find.html?locationIdentifier=REGION%5E297&sortType=6&includeSSTC=false",
+    "Southampton": "https://www.rightmove.co.uk/property-for-sale/find.html?locationIdentifier=REGION%5E1231&sortType=6&includeSSTC=false"
+}
 
-    print(f"🕷️  Starting scrape for URL: {rightmove_url} (Limit: {max_items})")
 
+# ---------------------
+
+def run_scraper(location_name, url, max_items=100):
+    print(f"\n🕷️  Starting scrape for: {location_name} (Target: {max_items})...")
     client = ApifyClient(APIFY_TOKEN)
 
-    # 2. Input Schema (FIXED)
-    # We pass the URL string directly in the list, NOT wrapped in { "url": ... }
     run_input = {
-        "startUrls": [rightmove_url],
+        "startUrls": [url],
         "maxItems": max_items,
         "listingType": "sale",
-        "proxy": {
-            "useApifyProxy": True,
-            "apifyProxyGroups": ["RESIDENTIAL"]
-        },
-        "endPage": 1
+        "proxy": {"useApifyProxy": True, "apifyProxyGroups": ["RESIDENTIAL"]},
+        # Removed "endPage" so it actually reaches the maxItems limit
     }
 
-    print("⏳ Waiting for Apify to finish (this takes ~30-60 seconds)...")
     run = client.actor(ACTOR_ID).call(run_input=run_input)
 
     if not run:
-        raise Exception("Apify run failed to start.")
+        print(f"   ❌ Failed to start scrape for {location_name}")
+        return []
 
     dataset_id = run["defaultDatasetId"]
-    print(f"✅ Scrape complete! Fetching results from Dataset: {dataset_id}")
+    print(f"   ✅ Scrape complete! Fetching results...")
 
     items = []
+    # Loop through pages of results to ensure we get everything
     for item in client.dataset(dataset_id).iterate_items():
         items.append(item)
 
     return items
 
 
-def upload_listings_to_gcs(data, location):
-    """
-    Saves the complex JSON data to GCS.
-    """
+def upload_listings_to_gcs(data, location_name):
     if not data:
-        print("⚠️  No data scraped.")
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     storage_client = storage.Client()
     bucket = storage_client.bucket(BUCKET_NAME)
 
-    # 1. Save RAW JSON (Already worked!)
-    filename_json = f"raw/listings/{location}_{timestamp}.json"
-    blob = bucket.blob(filename_json)
-    blob.upload_from_string(json.dumps(data), content_type='application/json')
-    print(f"☁️  Uploaded Raw JSON: gs://{BUCKET_NAME}/{filename_json}")
-
-    # 2. Save Simplified CSV (The "Silver" Layer)
     simplified_data = []
     for item in data:
-        # SAFETY CHECK: Handle different image formats
+        # Robust Image Extraction
         main_image = None
         images = item.get("images")
-
         if images and isinstance(images, list) and len(images) > 0:
             first_img = images[0]
             if isinstance(first_img, dict):
-                main_image = first_img.get('url')  # It's a dict
+                main_image = first_img.get('url')
             elif isinstance(first_img, str):
-                main_image = first_img  # It's already a URL string
+                main_image = first_img
+
+        # Robust Description Extraction
+        description = item.get("summary") or item.get("description") or ""
 
         simplified_data.append({
-            "url": item.get("url"),
+            "city": location_name,
             "price": item.get("price"),
             "address": item.get("displayAddress"),
             "property_type": item.get("propertyType"),
-            "bedrooms": item.get("bedrooms"),
-            "description": item.get("summary"),
-            "main_image_url": main_image,  # Use our safe variable
+            "bedrooms": item.get("beds"),
+            "description": description,
+            "main_image_url": main_image,
             "scraped_at": timestamp
         })
 
     df = pd.DataFrame(simplified_data)
-    filename_csv = f"raw/listings_processed/{location}_{timestamp}.csv"
-    blob_csv = bucket.blob(filename_csv)
-    blob_csv.upload_from_string(df.to_csv(index=False), content_type='text/csv')
-    print(f"☁️  Uploaded Processed CSV: gs://{BUCKET_NAME}/{filename_csv}")
+
+    # Save as CSV
+    filename = f"raw/listings_processed/{location_name}_{timestamp}.csv"
+    bucket.blob(filename).upload_from_string(df.to_csv(index=False), content_type='text/csv')
+    print(f"   ☁️  Uploaded {len(df)} rows to: gs://{BUCKET_NAME}/{filename}")
 
 
 if __name__ == "__main__":
     if os.path.exists(KEY_PATH):
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = KEY_PATH
 
-    # TEST RUN
-    # Pick a location that exists in your Land Registry data (e.g., "Bristol")
-    LOCATION = "Birmingham"
+    # Loop through all cities
+    for city, url in TARGET_LOCATIONS.items():
+        try:
+            results = run_scraper(city, url, max_items=1000)
+            upload_listings_to_gcs(results, city)
 
-    try:
-        results = run_scraper(LOCATION, max_items=20)  # Keep low to save credits
-        upload_listings_to_gcs(results, LOCATION)
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        print("Tip: Check your APIFY_TOKEN and ensure you have credits.")
+
+
+
+
+
+
+        except Exception as e:
+            print(f"❌ Error scraping {city}: {e}")
+
+    print("\n🎉 MEGA SCRAPE COMPLETE!")
